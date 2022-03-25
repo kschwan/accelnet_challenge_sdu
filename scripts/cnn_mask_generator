@@ -1,0 +1,50 @@
+#!/usr/bin/env python3
+
+import accelnet_challenge_sdu.segmentation_tensorflow as sdusegm
+import cv_bridge
+import numpy as np
+import rospy
+import sensor_msgs.msg
+import message_filters
+
+
+"""
+It would be great to be able to run two instances of this node in parallel
+but currently that would require either two GPU's or more memory than the 8GB
+my 3070 Ti has.
+"""
+
+rospy.init_node('cnn_mask_generator')
+
+publishers = [
+    rospy.Publisher('left/segmentation', sensor_msgs.msg.Image, queue_size=3),
+    rospy.Publisher('right/segmentation', sensor_msgs.msg.Image, queue_size=3),
+]
+
+segmentation_model = sdusegm.SegmentationModelV2()
+cv_bro = cv_bridge.CvBridge()
+
+def predict_masks(*msgs):
+    # The model was trained on RGB format (which is what AMBF outputs)
+    imgs = [cv_bro.imgmsg_to_cv2(m, desired_encoding='rgb8') for m in msgs]
+    masks = [segmentation_model.generate_masks(im) for im in imgs]
+
+    for msg_in, mask, pub in zip(msgs, masks, publishers):
+        # I defined label colors in BGR format
+        msg_out = cv_bro.cv2_to_imgmsg(mask, encoding='bgr8')
+        msg_out.header.stamp = msg_in.header.stamp  # pass through time stamp
+        pub.publish(msg_out)
+
+subscribers = [
+    message_filters.Subscriber('left/image_rect_color', sensor_msgs.msg.Image),
+    message_filters.Subscriber('right/image_rect_color', sensor_msgs.msg.Image),
+]
+
+# Use a TimeSynchronizer here to avoid going out of sync too much --
+# the inference rate that can be obtained by the CNN is significantly lower
+# than that of the incoming messages. That is, if we have a buffer overrun and
+# drop messages, at least we drop synchronized left and right frames.
+synchronizer = message_filters.TimeSynchronizer(subscribers, queue_size=2)
+synchronizer.registerCallback(predict_masks)
+
+rospy.spin()

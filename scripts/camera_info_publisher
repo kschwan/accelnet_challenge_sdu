@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+
+import accelnet_challenge_sdu as sdu
+import cv2 as cv
+import cv_bridge
+import numpy as np
+import rospy
+import sensor_msgs.msg
+import tf2_ros
+
+
+# It would be nicer if AMBF published CameraInfo messages.
+rospy.init_node('camera_info_publisher')
+
+tf_buffer = tf2_ros.Buffer()
+tf_listener = tf2_ros.TransformListener(tf_buffer)
+
+# Latched publishers!
+pub1 = rospy.Publisher('left/camera_info', sensor_msgs.msg.CameraInfo, latch=True, queue_size=1)
+pub2 = rospy.Publisher('right/camera_info', sensor_msgs.msg.CameraInfo, latch=True, queue_size=1)
+
+# Parameters according to
+# https://github.com/collaborative-robotics/surgical_robotics_challenge/blob/master/docs/camera_conventions.md
+size = (1920, 1080)
+fva = 1.2
+f = size[1] / (2 * np.tan(fva / 2))
+cx = size[0] / 2
+cy = size[1] / 2
+
+# Intrinsic camera parameters (same for both)
+K = np.array([
+    [f, 0, cx],
+    [0, f, cy],
+    [0, 0, 1],
+])
+
+# We use the 'stereo_center' frame which is placed between left and right cameras
+msg1 = tf_buffer.lookup_transform('stereo_center', 'cameraL_cv', time=rospy.Time(), timeout=rospy.Duration(5))
+T1 = sdu.Pose.from_msg(msg1.transform).to_matrix()
+
+msg2 = tf_buffer.lookup_transform('stereo_center', 'cameraR_cv', time=rospy.Time(), timeout=rospy.Duration(5))
+T2 = sdu.Pose.from_msg(msg2.transform).to_matrix()
+
+# No reason to keep listening to /tf
+tf_listener.unregister()
+
+# Projection matrices
+baseline = (np.linalg.inv(T1) @ T2)[0,3]
+Tx = -f * baseline
+P1 = np.c_[K, [0, 0, 0]]
+P2 = np.c_[K, [Tx, 0, 0]]
+
+m1 = sensor_msgs.msg.CameraInfo()
+m1.header.stamp = msg1.header.stamp
+m1.header.frame_id = msg1.child_frame_id
+m1.width = size[0]
+m1.height = size[1]
+m1.distortion_model = 'plumb_bob'
+m1.D = [0, 0, 0, 0, 0]             # Distortion coefficients
+m1.K = K.ravel().tolist()          # Intrinsic camera matrix for the raw (distorted) images
+m1.R = T1[:3,:3].ravel().tolist()  # Rectification matrix (stereo cameras only)
+m1.P = P1.ravel().tolist()         # Projection/camera matrix
+pub1.publish(m1)
+
+m2 = sensor_msgs.msg.CameraInfo()
+m2.header.stamp = msg2.header.stamp
+m2.header.frame_id = msg2.child_frame_id
+m2.width = size[0]
+m2.height = size[1]
+m2.distortion_model = 'plumb_bob'
+m2.D = [0, 0, 0, 0, 0]
+m2.K = K.ravel().tolist()
+m2.R = T2[:3,:3].ravel().tolist()
+m2.P = P2.ravel().tolist()
+pub2.publish(m2)
+
+rospy.spin()

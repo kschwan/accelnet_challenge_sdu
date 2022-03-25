@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+
+import accelnet_challenge_sdu.segmentation_render as sdusegm
+import accelnet_challenge_sdu as sdu
+import cv_bridge
+import rospy
+import sensor_msgs.msg
+import tf2_ros
+
+
+rospy.init_node('truth_mask_generator')
+
+tf_buffer = tf2_ros.Buffer()
+tf_listener = tf2_ros.TransformListener(tf_buffer)
+
+publishers = [
+    rospy.Publisher('/sdu/segmentation/left', sensor_msgs.msg.Image, queue_size=2),
+    rospy.Publisher('/sdu/segmentation/right', sensor_msgs.msg.Image, queue_size=2),
+]
+
+tf_msg = tf_buffer.lookup_transform('cameraR_cv', 'cameraL_cv', rospy.Time(), rospy.Duration(2))
+extrinsic_matrix = sdu.Pose.from_msg(tf_msg.transform).to_matrix()
+camera_model = sdu.StereoCameraModel(extrinsic_matrix)
+segmentation_model = sdusegm.GroundTruthSegmentationModel(camera_model)
+cv_bridge = cv_bridge.CvBridge()
+
+rate = rospy.Rate(5)
+
+while not rospy.is_shutdown():
+    # We must do Open3D rendering from the main thread!
+    masks = segmentation_model.generate_masks(tf_buffer, rospy.Time())
+    stamp = rospy.Time.now()
+
+    for mask, pub in zip(masks, publishers):
+        m = cv_bridge.cv2_to_imgmsg(mask, encoding='bgr8')
+        m.header.stamp = stamp
+        pub.publish(m)
+
+    rate.sleep()

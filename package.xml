@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>accelnet_challenge_sdu</name>
+  <version>0.1.0</version>
+  <description>The accelnet_challenge_sdu package</description>
+  <maintainer email="kils@mmmi.sdu.dk">Kim Lindberg Schwaner</maintainer>
+  <license>BSD</license>
+  <!-- <url type="website"></url> -->
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>rospy</depend>
+</package>

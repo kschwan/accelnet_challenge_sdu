@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+
+import cv2 as cv
+import cv_bridge
+import image_geometry
+import rospy
+import sensor_msgs.msg
+
+
+"""
+Node to rectify images.
+"""
+
+rospy.init_node('rectify')
+
+pub = rospy.Publisher('image_rect_color', sensor_msgs.msg.Image, queue_size=1)
+cv_bro = cv_bridge.CvBridge()
+camera_model = image_geometry.PinholeCameraModel()
+camera_model.fromCameraInfo(rospy.wait_for_message('camera_info', sensor_msgs.msg.CameraInfo))
+
+# We could also use cv.warpPerspective with M = K @ R @ inv(K) since distortion
+# parameters are zero, but cv.remap is faster.
+rectification_maps = cv.initUndistortRectifyMap(
+    cameraMatrix=camera_model.K,
+    distCoeffs=camera_model.D,
+    R=camera_model.R,
+    newCameraMatrix=camera_model.P,
+    size=(camera_model.width, camera_model.height),
+    m1type=cv.CV_16SC2,  # Fixed-point for speed
+    # m1type=cv.CV_32FC1,
+)
+
+def rectify(msg_in):
+    img = cv_bro.imgmsg_to_cv2(msg_in)
+    rect = cv.remap(img, *rectification_maps, interpolation=cv.INTER_LINEAR)
+    msg_out = cv_bro.cv2_to_imgmsg(rect)
+    msg_out.header.stamp = msg_in.header.stamp  # pass through time stamp
+    msg_out.encoding = msg_in.encoding  # pass through encoding
+    pub.publish(msg_out)
+
+sub = rospy.Subscriber('image_raw', sensor_msgs.msg.Image, rectify)
+rospy.spin()

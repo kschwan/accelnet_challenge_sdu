@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+
+import accelnet_challenge_sdu.segmentation_tensorflow as sdusegm
+import cv_bridge
+import numpy as np
+import rospy
+import sensor_msgs.msg
+import message_filters
+
+
+"""
+It would be great to be able to run two instances of this node in parallel
+but currently that would require either two GPU's or more memory than the 8GB
+my 3070 Ti has.
+"""
+
+rospy.init_node('cnn_mask_generator')
+
+pub = rospy.Publisher('segmentation', sensor_msgs.msg.Image, queue_size=3)
+segmentation_model = sdusegm.SegmentationModelV2()
+cv_bro = cv_bridge.CvBridge()
+
+def predict_masks(msg_in):
+    img = cv_bro.imgmsg_to_cv2(msg_in, desired_encoding='rgb8')  # The model was trained on RGB8 format (which is what AMBF outputs)
+    mask = segmentation_model.generate_masks(img)
+    msg_out = cv_bro.cv2_to_imgmsg(mask, encoding='bgr8')  # Label colors are in BGR format
+    msg_out.header.stamp = msg_in.header.stamp  # pass through time stamp
+    pub.publish(msg_out)
+
+sub = rospy.Subscriber('image_rect_color', sensor_msgs.msg.Image, predict_masks, queue_size=1)
+rospy.spin()

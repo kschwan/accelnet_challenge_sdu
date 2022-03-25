@@ -1,0 +1,26 @@
+<launch>
+  <group ns="sdu">
+    <group ns="stereo">
+
+      <node name="camera_info_publisher" type="camera_info_publisher" pkg="accelnet_challenge_sdu" output="screen" />
+
+      <group ns="left">
+        <node name="rectify" type="rectify" pkg="accelnet_challenge_sdu" output="screen">
+          <remap from="image_raw" to="/ambf/env/cameras/cameraL/ImageData" />
+        </node>
+        <!-- <node name="cnn_mask_generator_single" type="cnn_mask_generator_single" pkg="accelnet_challenge_sdu" output="screen" /> -->
+      </group>
+
+      <group ns="right">
+        <node name="rectify" type="rectify" pkg="accelnet_challenge_sdu" output="screen">
+          <remap from="image_raw" to="/ambf/env/cameras/cameraR/ImageData" />
+        </node>
+      </group>
+
+      <!-- <node name="cnn_mask_generator" type="cnn_mask_generator" pkg="accelnet_challenge_sdu" output="screen" /> -->
+
+      <!-- <node name="needle_tracker" type="needle_tracker" pkg="accelnet_challenge_sdu" output="screen" /> -->
+
+    </group>
+  </group>
+</launch>

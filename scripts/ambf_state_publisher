@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+
+import ambf_msgs.msg
+import geometry_msgs.msg
+import rospy
+import tf2_ros
+import threading
+
+
+def pose_to_transform(pose):
+    tf = geometry_msgs.msg.Transform()
+    tf.translation.x = pose.position.x
+    tf.translation.y = pose.position.y
+    tf.translation.z = pose.position.z
+    tf.rotation.w = pose.orientation.w
+    tf.rotation.x = pose.orientation.x
+    tf.rotation.y = pose.orientation.y
+    tf.rotation.z = pose.orientation.z
+    return tf
+
+
+rospy.init_node('ambf_state_publisher')
+lock = threading.Lock()
+ambf_frames = {}
+time_last_published = {}
+
+def set_frame(msg, key):
+    with lock:
+        ambf_frames[key] = msg
+
+subscribers = [
+    rospy.Subscriber('/ambf/env/psm1/baselink/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='psm1/baselink'),
+    rospy.Subscriber('/ambf/env/psm2/baselink/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='psm2/baselink'),
+    rospy.Subscriber('/ambf/env/Needle/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='Needle'),
+    rospy.Subscriber('/ambf/env/CameraFrame/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='CameraFrame'),
+    rospy.Subscriber('/ambf/env/cameras/cameraL/State', ambf_msgs.msg.CameraState, set_frame, callback_args='cameraL'),
+    rospy.Subscriber('/ambf/env/cameras/cameraR/State', ambf_msgs.msg.CameraState, set_frame, callback_args='cameraR'),
+    rospy.Subscriber('/ambf/env/Entry1/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='Entry1'),
+    rospy.Subscriber('/ambf/env/Entry2/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='Entry2'),
+    rospy.Subscriber('/ambf/env/Entry3/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='Entry3'),
+    rospy.Subscriber('/ambf/env/Entry4/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='Entry4'),
+    rospy.Subscriber('/ambf/env/Exit1/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='Exit1'),
+    rospy.Subscriber('/ambf/env/Exit2/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='Exit2'),
+    rospy.Subscriber('/ambf/env/Exit3/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='Exit3'),
+    rospy.Subscriber('/ambf/env/Exit4/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='Exit4'),
+    rospy.Subscriber('/ambf/env/psm1/toolyawlink/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='psm1/toolyawlink'),
+    rospy.Subscriber('/ambf/env/psm1/toolrolllink/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='psm1/toolrolllink'),
+    rospy.Subscriber('/ambf/env/psm1/toolpitchlink/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='psm1/toolpitchlink'),
+    rospy.Subscriber('/ambf/env/psm1/toolgripper1link/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='psm1/toolgripper1link'),
+    rospy.Subscriber('/ambf/env/psm1/toolgripper2link/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='psm1/toolgripper2link'),
+    rospy.Subscriber('/ambf/env/psm2/toolyawlink/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='psm2/toolyawlink'),
+    rospy.Subscriber('/ambf/env/psm2/toolrolllink/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='psm2/toolrolllink'),
+    rospy.Subscriber('/ambf/env/psm2/toolpitchlink/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='psm2/toolpitchlink'),
+    rospy.Subscriber('/ambf/env/psm2/toolgripper1link/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='psm2/toolgripper1link'),
+    rospy.Subscriber('/ambf/env/psm2/toolgripper2link/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='psm2/toolgripper2link'),
+    rospy.Subscriber('/ambf/env/Thread/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args='Thread'),
+]
+
+for i in range(1, 40):
+    subscribers.append(rospy.Subscriber(f'/ambf/env/Thread_{i:03d}/State', ambf_msgs.msg.RigidBodyState, set_frame, callback_args=f'Thread_{i:03d}'))
+
+tf_broadcaster = tf2_ros.TransformBroadcaster()
+rate = rospy.Rate(30)
+
+while not rospy.is_shutdown():
+    transforms = []
+
+    with lock:
+        for frame, msg in ambf_frames.items():
+            try:
+                if msg.header.stamp == time_last_published[frame]:
+                    continue
+            except KeyError:
+                pass
+
+            tf = geometry_msgs.msg.TransformStamped()
+            tf.header.stamp = msg.header.stamp
+            try:
+                tf.header.frame_id = msg.parent_name.data.replace('BODY ', '')
+            except AttributeError:
+                tf.header.frame_id = 'world'
+            tf.child_frame_id = frame
+            tf.transform = pose_to_transform(msg.pose)
+            transforms.append(tf)
+            time_last_published[frame] = msg.header.stamp
+
+        ambf_frames.clear()
+
+    tf_broadcaster.sendTransform(transforms)
+    rate.sleep()

@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+
+import accelnet_challenge_sdu as sdu
+import rospy
+import tf2_ros
+import geometry_msgs.msg
+import sensor_msgs.msg
+
+
+rospy.init_node('task1')
+
+target_frame = rospy.get_param('~target_frame')
+
+pub_result = rospy.Publisher('completion_report', geometry_msgs.msg.PoseStamped, queue_size=1)
+pub_servo_jp = rospy.Publisher('/CRTK/ecm/servo_jp', sensor_msgs.msg.JointState, queue_size=1)
+
+tf_buffer = tf2_ros.Buffer()
+tf_listener = tf2_ros.TransformListener(tf_buffer)
+
+rospy.sleep(1)
+
+msg = sensor_msgs.msg.JointState()
+msg.header.stamp = rospy.Time.now()
+msg.position = [0, 0.19, -0.31, 0]
+pub_servo_jp.publish(msg)
+
+rospy.sleep(2)
+
+msg_needle = rospy.wait_for_message('needle_pose_measured', geometry_msgs.msg.PoseStamped)
+msg_target = tf_buffer.lookup_transform(target_frame, msg_needle.header.frame_id, time=msg_needle.header.stamp, timeout=rospy.Duration(1))
+
+pose_ecm_needle = sdu.Pose.from_msg(msg_target.transform) @ sdu.Pose.from_msg(msg_needle.pose)
+
+msg_ecm_needle = geometry_msgs.msg.PoseStamped()
+msg_ecm_needle.header.frame_id = target_frame
+msg_ecm_needle.header.stamp = msg_needle.header.stamp
+msg_ecm_needle.pose = pose_ecm_needle.to_msg('geometry_msgs/Pose')
+pub_result.publish(msg_ecm_needle)
+
+rospy.sleep(2)

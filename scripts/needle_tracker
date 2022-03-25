@@ -1,0 +1,516 @@
+#!/usr/bin/env python3
+
+import accelnet_challenge_sdu as sdu
+import collections
+import cv2 as cv
+import cv_bridge
+import image_geometry
+import message_filters
+import numpy as np
+import rospy
+import sensor_msgs.msg
+import stereo_msgs.msg
+import struct
+import open3d as o3d
+import geometry_msgs.msg
+import rospkg
+import os
+import sys
+import visualization_msgs.msg
+import scipy
+import scipy.optimize
+
+
+def fit_plane(points):
+    """
+    Fit orthogonal least squares plane to 3D points.
+
+    The singular vector corresponding to the smallest eigenvalue is normal to
+    the plane and the plane contains the centroid of the data
+
+    Return: plane defined by normal and point
+    """
+
+    # Centroid of the data
+    C = np.average(points, axis=0)
+
+    # SVD of the data with the centroid subtracted
+    U, s, Vh = np.linalg.svd(points - C)
+
+    return Vh[2,:], C  # (a, b, c), (x0, y0, z0)
+
+
+def normalize(v):
+    norm = np.linalg.norm(v)
+
+    if norm == 0:
+       raise ZeroDivisionError
+
+    return v / norm
+
+
+def angles_in_ellipse(num, a, b):
+    # Stolen from https://stackoverflow.com/questions/6972331/how-can-i-generate-a-set-of-points-evenly-distributed-along-the-perimeter-of-an
+    assert(num > 0)
+    assert(a < b)
+
+    angles = 2 * np.pi * np.arange(num) / num
+
+    if a != b:
+        e2 = (1.0 - a ** 2.0 / b ** 2.0)
+        tot_size = scipy.special.ellipeinc(2.0 * np.pi, e2)
+        arc_size = tot_size / num
+        arcs = np.arange(num) * arc_size
+        res = scipy.optimize.root(lambda x: (scipy.special.ellipeinc(x, e2) - arcs), angles)
+        angles = res.x
+
+    return angles
+
+
+def bounding_rect(coords):
+    x1 = np.min(coords[1])
+    y1 = np.min(coords[0])
+    x2 = np.max(coords[1])
+    y2 = np.max(coords[0])
+    return (x1, y1, x2-x1+1, y2-y1+1)
+
+
+def union(a, b):
+    x = min(a[0], b[0])
+    y = min(a[1], b[1])
+    w = max(a[0] + a[2], b[0] + b[2]) - x
+    h = max(a[1] + a[3], b[1] + b[3]) - y
+    return (x, y, w, h)
+
+
+def intersection(a, b):
+    x = max(a[0], b[0])
+    y = max(a[1], b[1])
+    w = min(a[0] + a[2], b[0] + b[2]) - x
+    h = min(a[1] + a[3], b[1] + b[3]) - y
+
+    if w < 0 or h < 0:
+        return None
+
+    return (x, y, w, h)
+
+
+# Slices from rect [i.e. tuple of (x,y,w,h)]
+def sr(rect):
+    return (slice(rect[1], rect[1]+rect[3]), slice(rect[0], rect[0]+rect[2]))
+
+
+def match_stereo(im1, im2, mask1, mask2):
+    wsize = 5
+    d1 = collections.defaultdict(list)
+    d2 = collections.defaultdict(list)
+
+    idx1 = np.nonzero(mask1)
+    idx2 = np.nonzero(mask2)
+
+    for i, j in zip(*idx1):
+        d1[i].append(j)
+
+    for i, j in zip(*idx2):
+        d2[i].append(j)
+
+    comb1 = im1
+    comb2 = im2
+    # Also factor in segmentation result when computing score
+    # mask_weight = 20
+    # comb1 = np.dstack((im1, mask1.astype(im1.dtype)*mask_weight))
+    # comb2 = np.dstack((im2, mask2.astype(im2.dtype)*mask_weight))
+
+    try:
+        max_score = wsize**2 * comb1.shape[2] * np.iinfo(comb1.dtype).max  # SAD
+        # max_score = wsize**2 * comb1.shape[2]**2 * np.iinfo(comb1.dtype).max  # SSD
+    except IndexError:
+        max_score = wsize**2 * np.iinfo(comb1.dtype).max
+
+    sz = wsize // 2
+    disparity_map = np.zeros((comb1.shape[0], comb1.shape[1]), dtype=np.float32)
+    points1 = []
+    # points2 = []
+    # disparity_points = []
+
+    ys = list(d1.keys() & d2.keys())
+
+    # HACK: compute disparities for fewer points to increase speed when needle
+    #       is close to camera (bilateralFilter is OK with this for cases observed
+    #       in simulator)
+    down = max(1, min(5, len(idx1[0]) // 1000))
+
+    # TODO: Can this loop be optimized with some clever numpy-stuff? Or implement in C++
+    for i in ys[::down]:  # slice to downsample
+        for j in d1[i]:
+            prev_score = max_score
+            disp = None
+            pt1 = None
+            # pt2 = None
+
+            # sz2 = sz
+            sz2 = max(len(d1[i]) // 2, len(d2[i]) // 2, sz)  # Adaptive window size
+            r1 = comb1[i-sz:i+sz+1,j-sz2:j+sz2+1]
+
+            # for k in range(j-128, j+1):
+            for k in range(min(d2[i]) - 2*wsize, max(d2[i]) + 2*wsize, down):  # Look a bit "outside" segmentation mask
+                # don't consider disparities outside this range
+                if 0 > j-k > 128:
+                    disp = None
+                    continue
+
+                r2 = comb2[i-sz:i+sz+1,k-sz2:k+sz2+1]
+                score = np.sum(np.abs(np.subtract(r2, r1, dtype=int)))  # SAD
+                # score = np.sum(np.square(np.subtract(r2, r1, dtype=int)))  # SSD
+
+                if score < prev_score:
+                    prev_score = score
+                    disp = j - k
+                    pt1 = (j, i)
+                    # pt2 = (k, i)
+
+
+
+            if disp is not None:
+                points1.append(pt1)
+                # points2.append(pt2)
+                # disparity_points.append(disp)
+                disparity_map[pt1[1], pt1[0]] = disp
+
+    return points1, disparity_map
+
+
+def preprocess_point_cloud(pcd, voxel_size):
+    pcd_down = pcd.voxel_down_sample(voxel_size)
+    # pcd_down = pcd
+    pcd_down.estimate_normals(
+        o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size*2.0, max_nn=30))
+    pcd_fpfh = o3d.pipelines.registration.compute_fpfh_feature(
+        pcd_down,  o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size*5.0, max_nn=100))
+    return pcd_down, pcd_fpfh
+
+
+rospy.init_node('needle_tracker')
+
+camera_model = image_geometry.StereoCameraModel()
+camera_model.fromCameraInfo(
+    rospy.wait_for_message('left/camera_info', sensor_msgs.msg.CameraInfo),
+    rospy.wait_for_message('right/camera_info', sensor_msgs.msg.CameraInfo)
+)
+
+pub_disp = rospy.Publisher('needle_disparity', stereo_msgs.msg.DisparityImage, queue_size=1)
+pub_pointcloud = rospy.Publisher('needle_points', sensor_msgs.msg.PointCloud2, queue_size=1)
+pub_pose = rospy.Publisher('needle_pose_measured', geometry_msgs.msg.PoseStamped, queue_size=1)
+pub_plane = rospy.Publisher('needle_plane', geometry_msgs.msg.PoseStamped, queue_size=1)
+pub_markers = rospy.Publisher('/sdu/markers', visualization_msgs.msg.MarkerArray, queue_size=2)
+
+cv_bro = cv_bridge.CvBridge()
+
+needle_radius = 0.1018
+voxel_size = 2 * np.pi * needle_radius / 64
+
+package_path = rospkg.RosPack().get_path('accelnet_challenge_sdu')
+needle_mesh = o3d.io.read_triangle_mesh(os.path.join(package_path, 'resources', 'meshes', 'needle.obj'), enable_post_processing=True)
+
+target = needle_mesh.sample_points_poisson_disk(1000)
+target_down, target_fpfh = preprocess_point_cloud(target, voxel_size)
+
+tf_init = None
+
+def pipeline(*msgs):
+    # Images as NumPy arrays
+    im1, im2, mask1, mask2 = (cv_bro.imgmsg_to_cv2(m) for m in msgs)
+
+    # Binary needle masks (color BGR format)<
+    needle1 = np.all(mask1 == (0, 0, 255), axis=-1)
+    needle2 = np.all(mask2 == (0, 0, 255), axis=-1)
+
+    pts1, disparity1 = match_stereo(im1, im2, needle1, needle2)
+
+    # print(len(pts1))
+
+    if not pts1:
+        rospy.logwarn("Got no points")
+        return
+
+    # Apply bilateral filter only to ROI (it's quite slow)
+    bb = cv.boundingRect(disparity1.astype(np.uint8))
+    sel = sr(bb)
+    # disparity1[sel] = cv.medianBlur(disparity1[sel], ksize=5)
+    disparity1[sel] = cv.bilateralFilter(disparity1[sel], d=-1, sigmaColor=3.5, sigmaSpace=31)
+
+    # Publish disparity image
+    # assert disparity1.dtype == np.float32
+    # di = stereo_msgs.msg.DisparityImage()
+    # di.header.stamp = camera_model.left.stamp
+    # di.header.frame_id = camera_model.left.tf_frame
+    # di.image = cv_bro.cv2_to_imgmsg(disparity1)
+    # di.image.header.stamp = di.header.stamp
+    # di.image.header.frame_id = di.header.frame_id
+    # di.f = camera_model.right.fx()
+    # di.T = -camera_model.right.Tx() / camera_model.right.fx()  # baseline
+    # di.valid_window.x_offset = bb[0]
+    # di.valid_window.x_offset = bb[1]
+    # di.valid_window.width = bb[2]
+    # di.valid_window.height = bb[3]
+    # di.min_disparity = 0
+    # di.max_disparity = 128  # FIXME
+    # di.delta_d = 0.125  # FIXME
+    # pub_disp.publish(di)
+
+    # From (x, y, disparity[x,y]) points to 3D
+    Tx = camera_model.right.Tx()
+    xyd = np.array([[x+Tx, y, disparity1[y,x]] for x, y in pts1], dtype=np.float32).reshape(-1, 1, 3)
+    pts3d = cv.perspectiveTransform(xyd, camera_model.Q).reshape(-1, 3)
+
+    colors = np.array([im1[y, x] for x, y in pts1])
+
+    # HACK rough filtering in case segmentation results have errors
+    cond = (pts3d[:,0] > -1) & (pts3d[:,0] < 1) & (pts3d[:,1] > -1) & (pts3d[:,1] < 1)  & (pts3d[:,2] > 0) & (pts3d[:,2] < 1.5)
+    pts3d = pts3d[cond]
+    colors = colors[cond]
+
+
+    # Publish point cloud message
+    msg_pc = sensor_msgs.msg.PointCloud2()
+    msg_pc.header.stamp = msgs[0].header.stamp
+    msg_pc.header.frame_id = camera_model.tfFrame()
+    msg_pc.height = 1
+    msg_pc.width = pts3d.shape[0]
+    msg_pc.fields = [sensor_msgs.msg.PointField(name, i*4, sensor_msgs.msg.PointField.FLOAT32, 1) for i, name in enumerate('xyz')]
+    msg_pc.fields.append(sensor_msgs.msg.PointField('rgb', 12, sensor_msgs.msg.PointField.UINT32, 1))
+    msg_pc.is_bigendian = False
+    msg_pc.point_step = 12 + 4 # 3*4 + 4
+    msg_pc.row_step = msg_pc.point_step * msg_pc.width * msg_pc.height
+    # assert pts3d.dtype == np.dtype('<f4')  # little-endian single-precision float (4 bytes)
+    # msg_pc.data = pts3d.tobytes()
+    msg_pc.data = b''.join([struct.pack('<fffI', x, y, z, np.uint32((r << 16) | (g << 8) | (b << 0))) for (x, y, z), (b, g, r) in zip(pts3d, colors)])
+    msg_pc.is_dense = True  # Only valid points? Maybe... I'm not sure what defines invalid ones
+    pub_pointcloud.publish(msg_pc)
+
+
+
+    # # Construct Open3D pointcloud
+    # source = o3d.geometry.PointCloud()
+    # source.points = o3d.utility.Vector3dVector(pts3d)
+    # source_down, source_fpfh = preprocess_point_cloud(source, voxel_size)
+
+    # # Global/initial registration
+    # distance_threshold = voxel_size * 2
+    # result_ransac = o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
+    #     source_down,
+    #     target_down,
+    #     source_fpfh,
+    #     target_fpfh,
+    #     mutual_filter=False,
+    #     max_correspondence_distance=distance_threshold,
+    #     estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
+    #     ransac_n=3,
+    #     checkers=[
+    #         o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
+    #         o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(distance_threshold),
+    #         # o3d.pipelines.registration.CorrespondenceCheckerBasedOnNormal(np.pi / 4),
+    #     ],
+    #     # criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(100000, 0.99)
+    # )
+
+    # # nonzero = cv2.findNonZero(img)
+    # # distances = np.sqrt((nonzero[:,:,0] - target[0]) ** 2 + (nonzero[:,:,1] - target[1]) ** 2)
+    # # nearest_index = np.argmin(distances)
+    # return nonzero[nearest_index]
+
+
+    # # Refine registration
+    # # if tf_init is None:
+    # tf_init = result_ransac.transformation
+
+    # distance_threshold = voxel_size * 0.5
+    # result_icp = o3d.pipelines.registration.registration_icp(
+    #     source,
+    #     target,
+    #     max_correspondence_distance = distance_threshold,
+    #     init=tf_init,
+    #     estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPlane(),
+    #     # estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(False),
+    #     # criteria=
+    # )
+
+    # tf_cam_needle = np.linalg.inv(result_icp.transformation)
+
+    # Fit least-squares 3D plane to points
+    n, o = fit_plane(pts3d)
+
+
+    # Project points onto plane defined by normal n and point o
+    #   p' = p - (n @ (p - o)) * n
+    pts3d_proj = pts3d - (n @ (pts3d - o).T)[:,np.newaxis] * n
+
+    # Transformation matrix from camera to chosen plane frame
+    x = np.array([1, 0, 0])  # choose same as camera's X-axis
+    y = normalize(np.cross(n, x))
+    tf_cam_plane = np.identity(4)
+    tf_cam_plane[:3,0] = x
+    tf_cam_plane[:3,1] = y
+    tf_cam_plane[:3,2] = n
+    tf_cam_plane[:3,3] = o
+
+    # Transform points from camera to plane frame (points will now have zero-ish Z component)
+    #   p' = tf_cam_plane^{-1} p
+    tf_plane_cam = np.linalg.inv(tf_cam_plane)
+    pts3d_plane = tf_plane_cam @ np.c_[pts3d_proj, np.ones(len(pts3d_proj))].T  # in homogenous coordinates
+    pts3d_plane = pts3d_plane.T[:,:3]
+
+    # Fit ellipse to "2D" points in plane
+    # center, size, angle = cv.fitEllipseDirect(pts3d_plane[:,:2].astype(np.float32))
+    center, size, angle = cv.fitEllipseAMS(pts3d_plane[:,:2].astype(np.float32))
+    a = size[0] / 2
+    b = size[1] / 2
+
+    # We find needle's end by using finding where the thread is attached.
+    # This will not work if thread overlaps with needle somewhere along its arc.
+    thread1 = np.all(mask1 == (0, 255, 255), axis=-1)
+    thread2 = np.all(mask2 == (0, 255, 255), axis=-1)
+
+    kernel = np.ones((5, 5), dtype=np.uint8)
+    needle1 = cv.dilate(needle1.astype(np.uint8), kernel=kernel, iterations=2)
+    thread1 = cv.dilate(thread1.astype(np.uint8), kernel=kernel, iterations=2)
+    needle2 = cv.dilate(needle2.astype(np.uint8), kernel=kernel, iterations=2)
+    thread2 = cv.dilate(thread2.astype(np.uint8), kernel=kernel, iterations=2)
+
+    contours1, hierarchy1 = cv.findContours(needle1 & thread1, mode=cv.RETR_TREE, method=cv.CHAIN_APPROX_NONE)
+    contours2, hierarchy2 = cv.findContours(needle2 & thread2, mode=cv.RETR_TREE, method=cv.CHAIN_APPROX_NONE)
+
+    mom1 = cv.moments(contours1[0])  # FIXME assuming one (and only one) contour
+    cx1 = mom1['m10'] / mom1['m00']
+    cy1 = mom1['m01'] / mom1['m00']
+    mom2 = cv.moments(contours2[0])
+    cx2 = mom2['m10'] / mom2['m00']
+    cy2 = mom2['m01'] / mom2['m00']
+    needle_end_3d = camera_model.projectPixelTo3d((cx1+Tx, cy1), cx1-cx2)
+    needle_end_3d = np.array(needle_end_3d)
+
+
+    center_cam = (tf_cam_plane @ np.array([center[0], center[1], 0, 1]))[:3]
+    # print(center_cam)
+    needle_end_3d_proj = needle_end_3d - (n @ (needle_end_3d - o)) * n
+    x = normalize(center_cam - needle_end_3d_proj)
+    y = normalize(np.cross(n, x))
+    tf_cam_needle = np.identity(4)
+    tf_cam_needle[:3,0] = x
+    tf_cam_needle[:3,1] = y
+    tf_cam_needle[:3,2] = n
+    tf_cam_needle[:3,3] = center_cam
+    # tf_cam_ellipse[:3,:3] = sdu.Rz(angle)
+    # tf_cam_ellipse = tf_cam_plane @ tf_plane_ellipse
+
+    # If most points are located on negative Y of needle frame
+    # we flip it 180 deg around X to make Y point the right way
+    tf_needle_plane = np.linalg.inv(tf_cam_needle) @ tf_cam_plane
+    if tf_needle_plane[1,3] < 0:
+        tf_cam_needle = tf_cam_needle @ sdu.Rx(np.pi)
+
+    # an extra adjustment because the vector between needle_end_3d and ellipse center is not exactly right
+    tf_cam_needle = tf_cam_needle @ sdu.Rz(np.deg2rad(-7))
+
+    pose_cam_needle = sdu.Pose.from_matrix(tf_cam_needle).to_msg('geometry_msgs/Pose')
+
+    # Publish estimated needle pose
+    msg_pose = geometry_msgs.msg.PoseStamped()
+    msg_pose.header.stamp = msgs[0].header.stamp
+    msg_pose.header.frame_id = camera_model.tfFrame()
+    msg_pose.pose = pose_cam_needle
+    pub_pose.publish(msg_pose)
+
+
+    #
+    # below: debug help
+    #
+    pose_cam_plane = sdu.Pose.from_matrix(tf_cam_plane).to_msg('geometry_msgs/Pose')
+
+    # plane pose
+    msg_plane = geometry_msgs.msg.PoseStamped()
+    msg_plane.header.stamp = msgs[0].header.stamp
+    msg_plane.header.frame_id = camera_model.tfFrame()
+    msg_plane.pose = pose_cam_plane
+    pub_plane.publish(msg_plane)
+
+    marker_array = visualization_msgs.msg.MarkerArray()
+
+    # marker: plane
+    marker = visualization_msgs.msg.Marker()
+    marker.header.frame_id = camera_model.tfFrame()
+    marker.header.stamp = msgs[0].header.stamp
+    marker.ns = 'needle_tracker'
+    marker.id = 1
+    marker.type = visualization_msgs.msg.Marker.CUBE
+    marker.action = visualization_msgs.msg.Marker.ADD
+    marker.pose = pose_cam_plane
+    marker.scale.x, marker.scale.y, marker.scale.z = (0.25, 0.25, 0.001)
+    marker.color.r, marker.color.g, marker.color.b, marker.color.a = (0.7, 0.7, 0.7, 0.4)
+    marker_array.markers.append(marker)
+
+    # marker: ellipse rect
+    marker = visualization_msgs.msg.Marker()
+    marker.header.frame_id = camera_model.tfFrame()
+    marker.header.stamp = msgs[0].header.stamp
+    marker.ns = 'needle_tracker'
+    marker.id = 2
+    marker.type = visualization_msgs.msg.Marker.LINE_STRIP
+    marker.action = visualization_msgs.msg.Marker.ADD
+    marker.pose = pose_cam_needle
+    marker.points = [
+        geometry_msgs.msg.Point(a, b, 0),
+        geometry_msgs.msg.Point(-a, b, 0),
+        geometry_msgs.msg.Point(-a, -b, 0),
+        geometry_msgs.msg.Point(a, -b, 0),
+        geometry_msgs.msg.Point(a, b, 0),
+    ]
+    marker.scale.x = 0.001
+    marker.color.r, marker.color.g, marker.color.b, marker.color.a = (1, 0, 0, 0.8)
+    marker_array.markers.append(marker)
+
+    # marker: line segments between points on ellipse
+    ang = np.linspace(0, 2*np.pi, 32)
+    X = a * np.cos(ang)
+    Y = b * np.sin(ang)
+    marker = visualization_msgs.msg.Marker()
+    marker.header.frame_id = camera_model.tfFrame()
+    marker.header.stamp = msgs[0].header.stamp
+    marker.ns = 'needle_tracker'
+    marker.id = 3
+    marker.type = visualization_msgs.msg.Marker.LINE_STRIP
+    marker.action = visualization_msgs.msg.Marker.ADD
+    marker.pose = pose_cam_needle
+    marker.points = [geometry_msgs.msg.Point(x, y, 0) for x, y in zip(X, Y)]
+    marker.scale.x = 0.001
+    marker.color.r, marker.color.g, marker.color.b, marker.color.a = (0, 1, 0, 0.8)
+    marker_array.markers.append(marker)
+
+    # needle end-point
+    marker = visualization_msgs.msg.Marker()
+    marker.header.frame_id = camera_model.tfFrame()
+    marker.header.stamp = msgs[0].header.stamp
+    marker.ns = 'needle_tracker'
+    marker.id = 4
+    marker.type = visualization_msgs.msg.Marker.SPHERE
+    marker.action = visualization_msgs.msg.Marker.ADD
+    marker.pose.position.x, marker.pose.position.y, marker.pose.position.z = needle_end_3d
+    marker.pose.orientation.w = 1
+    marker.scale.x, marker.scale.y, marker.scale.z = (0.01, 0.01, 0.01)
+    marker.color.r, marker.color.g, marker.color.b, marker.color.a = (1, 0, 0, 0.8)
+    marker_array.markers.append(marker)
+
+    pub_markers.publish(marker_array)
+
+
+subscribers = [
+    message_filters.Subscriber('left/image_rect_color', sensor_msgs.msg.Image),
+    message_filters.Subscriber('right/image_rect_color', sensor_msgs.msg.Image),
+    message_filters.Subscriber('left/segmentation', sensor_msgs.msg.Image),
+    message_filters.Subscriber('right/segmentation', sensor_msgs.msg.Image),
+]
+# We need a large queue size here as segmentation mask images arrive very late wrt. the others
+synchronizer = message_filters.TimeSynchronizer(subscribers, queue_size=100)
+synchronizer.registerCallback(pipeline)
+
+rospy.spin()

@@ -1,0 +1,7 @@
+<launch>
+  <group ns="sdu">
+    <node name="ambf_state_publisher" type="ambf_state_publisher" pkg="accelnet_challenge_sdu" output="screen" />
+    <node name="camera_transform_publisher" type="camera_transform_publisher" pkg="accelnet_challenge_sdu" output="screen" />
+    <node name="marker_publisher" type="marker_publisher" pkg="accelnet_challenge_sdu" output="screen" />
+  </group>
+</launch>

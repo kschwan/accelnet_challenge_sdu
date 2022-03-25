@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+
+import rospy
+import geometry_msgs.msg
+import tf2_ros
+
+"""
+Publish camera frames following ROS/OpenCV convention.
+"""
+
+rospy.init_node('camera_transform_publisher')
+tf_broadcaster = tf2_ros.TransformBroadcaster()
+transforms = []
+
+tf = geometry_msgs.msg.TransformStamped()
+tf.header.frame_id = 'cameraL'
+tf.child_frame_id = 'cameraL_cv'
+tf.transform.rotation.w = -0.5
+tf.transform.rotation.x = 0.5
+tf.transform.rotation.y = 0.5
+tf.transform.rotation.z = -0.5
+transforms.append(tf)
+
+tf = geometry_msgs.msg.TransformStamped()
+tf.header.frame_id = 'cameraR'
+tf.child_frame_id = 'cameraR_cv'
+tf.transform.rotation.w = -0.5
+tf.transform.rotation.x = 0.5
+tf.transform.rotation.y = 0.5
+tf.transform.rotation.z = -0.5
+transforms.append(tf)
+
+tf = geometry_msgs.msg.TransformStamped()
+tf.header.frame_id = 'CameraFrame'
+tf.child_frame_id = 'stereo_center'
+tf.transform.rotation.x = 1
+tf.transform.translation.z = -0.5
+transforms.append(tf)
+
+rate = rospy.Rate(10)
+
+while not rospy.is_shutdown():
+    tnow = rospy.Time.now()
+
+    for tf in transforms:
+        tf.header.stamp = tnow
+
+    tf_broadcaster.sendTransform(transforms)
+    rate.sleep()

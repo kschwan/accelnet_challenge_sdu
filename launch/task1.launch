@@ -1,0 +1,28 @@
+<launch>
+  <group ns="sdu">
+
+      <node name="ambf_state_publisher" type="ambf_state_publisher" pkg="accelnet_challenge_sdu" output="screen" />
+      <node name="camera_transform_publisher" type="camera_transform_publisher" pkg="accelnet_challenge_sdu" output="screen" />
+      <node name="camera_info_publisher" type="camera_info_publisher" pkg="accelnet_challenge_sdu" output="screen" />
+      <node name="cnn_mask_generator" type="cnn_mask_generator" pkg="accelnet_challenge_sdu" output="screen" />
+      <node name="needle_tracker" type="needle_tracker" pkg="accelnet_challenge_sdu" output="screen" />
+
+      <node name="task1" type="task1" pkg="accelnet_challenge_sdu" output="screen">
+        <param name="target_frame" value="CameraFrame" />
+        <remap from="completion_report" to="/surgical_robotics_challenge/completion_report/sdu/task1" />
+      </node>
+
+      <group ns="left">
+        <node name="rectify" type="rectify" pkg="accelnet_challenge_sdu" output="screen">
+          <remap from="image_raw" to="/ambf/env/cameras/cameraL/ImageData" />
+        </node>
+      </group>
+
+      <group ns="right">
+        <node name="rectify" type="rectify" pkg="accelnet_challenge_sdu" output="screen">
+          <remap from="image_raw" to="/ambf/env/cameras/cameraR/ImageData" />
+        </node>
+      </group>
+
+  </group>
+</launch>
