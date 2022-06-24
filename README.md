@@ -1,6 +1,6 @@
 # 2021-2022 AccelNet Surgical Robotics Challenge, SDU
 
-This is the submission to the 2021-2022 AccelNet Surgical Robotics Challenge from SDU Robotics University of Southern Denmark, Odense. I am submitting a solution to challenge #1 only. Although we originally planned to also submit solutions to tasks #2 and #32 I have not had the resources to finish them.
+This is the submission to the 2021-2022 AccelNet Surgical Robotics Challenge from SDU Robotics University of Southern Denmark, Odense. I am submitting a solution to challenge #1 only. Although we originally planned to also submit solutions to tasks #2 and #3 I have not had the resources to finish them.
 
 Our needle pose estimation pipeline uses a U-net-like CNN for pixel segmentation and runs very slow on a CPU. With a GeForce RTX 3070 Ti I see segmentation rates of 4-5 FPS on 1920x1080 images. Note that the first image in the pipeline is processed significantly slower than the subsequent ones.
 
